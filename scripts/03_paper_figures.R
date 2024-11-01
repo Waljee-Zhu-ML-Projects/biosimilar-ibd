@@ -144,6 +144,38 @@ load_classification_results <- function(valid_fname = NULL, test_fname = NULL) {
 
 ###################### Survival Analysis Figures ###################### 
 
+#### number of excluded individuals ####
+n_samples_ls <- list()
+for (forecast in c(3, 6, 12)) {
+  data_fname <- file.path(
+    DATA_DIR, "survival_data", sprintf("survival_forecast_%smo.RData", forecast)
+  )
+  load(data_fname) #> survival_df, survival_lab_df_median_imp, survival_lab_df_mean_imp, survival_lab_df_rf_imp
+  n_samples_ls <- c(
+    n_samples_ls, 
+    list(
+      tibble::tibble(
+        forecast = !!forecast,
+        n_samples = length(unique(survival_df$deId))
+      )
+    )
+  )
+}
+
+n_samples_df <- dplyr::bind_rows(n_samples_ls) |>
+  dplyr::rename(
+    `Forecast (months)` = forecast,
+    `# Patients Included` = n_samples
+  ) |>
+  dplyr::mutate(
+    `Forecast (months)` = as.integer(`Forecast (months)`),
+    `# Patients Excluded` = as.integer(2529 - `# Patients Included`)
+  )
+saveRDS(
+  n_samples_df, 
+  file = file.path(SURV_RESULTS_DIR, "n_samples.rds")
+)
+
 #### C-index results ####
 cindex_df <- dplyr::bind_rows(
   readRDS(
@@ -518,7 +550,7 @@ errs_df <- load_classification_results(
   test_fname = "test_errors.csv"
 ) |>
   dplyr::select(
-    -tidyselect::all_of(rm_metrics)
+    -V1, -tidyselect::all_of(rm_metrics)
   )
 
 errs_df_long <- errs_df |>
@@ -528,245 +560,256 @@ errs_df_long <- errs_df |>
     values_to = "estimate"
   )
 
-for (split_mode in c("validation", "test")) {
-  for (metric in metrics) {
-    metric_name <- dplyr::case_when(
-      metric == "auroc" ~ "AUROC",
-      metric == "auprc" ~ "AUPRC",
-      TRUE ~ stringr::str_to_title(metric)
-    )
-    
-    # prediction error plot
-    plt_df <- errs_df_long |>
-      dplyr::filter(
-        split_mode == !!split_mode,
-        is.na(censor_switcher),
-        impute_mode == "rf",
-        !(varset_mode %in% !!rm_varset_modes),
-        metric == !!metric
-      ) |>
-      dplyr::group_by(
-        method, censor_switcher, impute_mode,
-        forecast, forecast_name, accrual, accrual_name, varset_mode, metric
-      ) |>
-      dplyr::summarise(
-        mean_estimate = mean(estimate),
-        sd_estimate = sd(estimate),
-        se_estimate = sd(estimate) / sqrt(dplyr::n()),
-        n_estimate = dplyr::n(),
-        .groups = "drop"
+for (impute_mode in c("rf", "mean", "median")) {
+  for (split_mode in c("validation", "test")) {
+    for (metric in metrics) {
+      metric_name <- dplyr::case_when(
+        metric == "auroc" ~ "AUROC",
+        metric == "auprc" ~ "AUPRC",
+        TRUE ~ stringr::str_to_title(metric)
       )
-    plt <- plt_df |>
-      dplyr::mutate(
-        forecast = forcats::fct_inseq(as.factor(forecast))
-      ) |>
-      ggplot2::ggplot() +
-      ggplot2::geom_line(
-        ggplot2::aes(
-          x = forecast, 
-          y = mean_estimate, 
-          color = varset_mode,
-          group = varset_mode
-        )
-      ) +
-      ggplot2::geom_ribbon(
-        ggplot2::aes(
-          x = forecast,
-          ymin = mean_estimate - se_estimate,
-          ymax = mean_estimate + se_estimate,
-          fill = varset_mode,
-          group = varset_mode
-        ),
-        alpha = 0.1
-      ) +
-      ggplot2::facet_grid(accrual_name ~ method, scales = "free") +
-      ggplot2::labs(
-        x = "Forecast Period (months)",
-        y = metric_name, 
-        color = "Variables Used",
-        fill = "Variables Used"
-      ) +
-      vthemes::scale_color_vmodern(discrete = TRUE) +
-      vthemes::scale_fill_vmodern(discrete = TRUE) +
-      vthemes::theme_vmodern(size_preset = "medium")
-    ggplot2::ggsave(
-      plt,
-      filename = file.path(
-        FIGURES_DIR, 
-        sprintf("classification_%s_%s.pdf", split_mode, metric)
-      ),
-      width = 16,
-      height = 5
-    )
-    
-    # compare RF+ to logistic
-    if (split_mode == "validation") {
+      
+      # prediction error plot
       plt_df <- errs_df_long |>
         dplyr::filter(
           split_mode == !!split_mode,
           is.na(censor_switcher),
-          impute_mode == "rf",
-          varset_mode == "Mean, Max, Recent Labs Only",
+          impute_mode == !!impute_mode,
+          !(varset_mode %in% !!rm_varset_modes),
           metric == !!metric
         ) |>
-        tidyr::pivot_wider(
-          names_from = method,
-          values_from = estimate
-        ) |>
-        dplyr::mutate(
-          dplyr::across(
-            tidyselect::all_of(unique(errs_df_long$method)),
-            ~ `RF+` - .x
-          )
-        ) |>
-        tidyr::pivot_longer(
-          cols = tidyselect::all_of(unique(errs_df_long$method)),
-          names_to = "method",
-          values_to = "diff"
-        ) |>
-        dplyr::filter(
-          method != "RF+"
-        ) |>
-        dplyr::mutate(
-          method = rename_classification_methods(method)
-        )
-      plt_pvals_df <- plt_df |>
         dplyr::group_by(
-          censor_switcher, impute_mode, varset_mode, split_mode, metric,
-          forecast, forecast_name, accrual, accrual_name, method
+          method, censor_switcher, impute_mode,
+          forecast, forecast_name, accrual, accrual_name, varset_mode, metric
         ) |>
         dplyr::summarise(
-          perm_pval = purrr::map_lgl(
-            1:1000,
-            ~ mean(
-              sample(c(1, -1), size = length(diff), replace = TRUE) * diff
-            ) >
-              mean(diff)
-          ) |> 
-            mean(),
-          t_pval = t.test(
-            diff, mu = 0, alternative = "greater"
-          )$p.value,
-          wilcox_pval = wilcox.test(
-            diff, mu = 0, alternative = "greater"
-          )$p.value,
+          mean_estimate = mean(estimate),
+          sd_estimate = sd(estimate),
+          se_estimate = sd(estimate) / sqrt(dplyr::n()),
+          n_estimate = dplyr::n(),
           .groups = "drop"
-        ) |>
+        )
+      plt <- plt_df |>
         dplyr::mutate(
-          pval_label = dplyr::case_when(
-            perm_pval < 0.001 ~ "***",
-            perm_pval < 0.01 ~ "**",
-            perm_pval < 0.05 ~ "*",
-            TRUE ~ ""
-          )
-        )
-      plt <-  plt_df |>
+          forecast = forcats::fct_inseq(as.factor(forecast))
+        ) |>
         ggplot2::ggplot() +
-        ggplot2::geom_boxplot(
+        ggplot2::geom_line(
           ggplot2::aes(
-            x = method, y = diff 
-          ),
-          outlier.size = 0.75
-        ) +
-        ggplot2::geom_text(
-          ggplot2::aes(
-            x = method, y = Inf, label = pval_label
-          ),
-          angle = 90, hjust = 1, vjust = 0.75, size = 7,
-          data = plt_pvals_df
-        ) +
-        ggplot2::geom_hline(yintercept = 0, linetype = "dashed") +
-        ggplot2::facet_grid(accrual_name ~ forecast_name, scales = "free_y") +
-        ggplot2::labs(
-          x = "Method", 
-          y = sprintf("RF+ %s - Model %s", metric_name, metric_name)
-        ) +
-        vthemes::theme_vmodern(
-          size_preset = "medium"
-        ) +
-        ggplot2::theme(
-          axis.text.x = ggplot2::element_text(
-            size = 12, angle = 90, hjust = 1, vjust = 0.5
+            x = forecast, 
+            y = mean_estimate, 
+            color = varset_mode,
+            group = varset_mode
           )
-        )
+        ) +
+        ggplot2::geom_ribbon(
+          ggplot2::aes(
+            x = forecast,
+            ymin = mean_estimate - se_estimate,
+            ymax = mean_estimate + se_estimate,
+            fill = varset_mode,
+            group = varset_mode
+          ),
+          alpha = 0.1
+        ) +
+        ggplot2::facet_grid(accrual_name ~ method, scales = "free") +
+        ggplot2::labs(
+          x = "Forecast Period (months)",
+          y = metric_name, 
+          color = "Variables Used",
+          fill = "Variables Used"
+        ) +
+        vthemes::scale_color_vmodern(discrete = TRUE) +
+        vthemes::scale_fill_vmodern(discrete = TRUE) +
+        vthemes::theme_vmodern(size_preset = "medium")
       ggplot2::ggsave(
         plt,
         filename = file.path(
           FIGURES_DIR, 
-          sprintf("classification_%s_%s_comparison.pdf", split_mode, metric)
+          sprintf(
+            "classification_%s_%s_%s_imputed.pdf", 
+            split_mode, metric, impute_mode
+          )
         ),
-        width = 10,
-        height = 6
+        width = 14,
+        height = 4.5
       )
+      
+      # compare RF+ to logistic
+      if (split_mode == "validation") {
+        plt_df <- errs_df_long |>
+          dplyr::filter(
+            split_mode == !!split_mode,
+            is.na(censor_switcher),
+            impute_mode == !!impute_mode,
+            varset_mode == "Mean, Max, Recent Labs Only",
+            metric == !!metric
+          ) |>
+          tidyr::pivot_wider(
+            names_from = method,
+            values_from = estimate
+          ) |>
+          dplyr::mutate(
+            dplyr::across(
+              tidyselect::all_of(unique(errs_df_long$method)),
+              ~ `RF+` - .x
+            )
+          ) |>
+          tidyr::pivot_longer(
+            cols = tidyselect::all_of(unique(errs_df_long$method)),
+            names_to = "method",
+            values_to = "diff"
+          ) |>
+          dplyr::filter(
+            method != "RF+"
+          ) |>
+          dplyr::mutate(
+            method = rename_classification_methods(method)
+          )
+        plt_pvals_df <- plt_df |>
+          dplyr::group_by(
+            censor_switcher, impute_mode, varset_mode, split_mode, metric,
+            forecast, forecast_name, accrual, accrual_name, method
+          ) |>
+          dplyr::summarise(
+            perm_pval = purrr::map_lgl(
+              1:1000,
+              ~ mean(
+                sample(c(1, -1), size = length(diff), replace = TRUE) * diff
+              ) >
+                mean(diff)
+            ) |> 
+              mean(),
+            t_pval = t.test(
+              diff, mu = 0, alternative = "greater"
+            )$p.value,
+            wilcox_pval = wilcox.test(
+              diff, mu = 0, alternative = "greater"
+            )$p.value,
+            .groups = "drop"
+          ) |>
+          dplyr::mutate(
+            pval_label = dplyr::case_when(
+              perm_pval < 0.001 ~ "***",
+              perm_pval < 0.01 ~ "**",
+              perm_pval < 0.05 ~ "*",
+              TRUE ~ ""
+            )
+          )
+        plt <-  plt_df |>
+          ggplot2::ggplot() +
+          ggplot2::geom_boxplot(
+            ggplot2::aes(
+              x = method, y = diff 
+            ),
+            outlier.size = 0.75
+          ) +
+          ggplot2::geom_text(
+            ggplot2::aes(
+              x = method, y = Inf, label = pval_label
+            ),
+            angle = 90, hjust = 1, vjust = 0.75, size = 7,
+            data = plt_pvals_df
+          ) +
+          ggplot2::geom_hline(yintercept = 0, linetype = "dashed") +
+          ggplot2::facet_grid(accrual_name ~ forecast_name, scales = "free_y") +
+          ggplot2::labs(
+            x = "Method", 
+            y = sprintf("RF+ %s - Model %s", metric_name, metric_name)
+          ) +
+          vthemes::theme_vmodern(
+            size_preset = "medium"
+          ) +
+          ggplot2::theme(
+            axis.text.x = ggplot2::element_text(
+              size = 12, angle = 90, hjust = 1, vjust = 0.5
+            )
+          )
+        ggplot2::ggsave(
+          plt,
+          filename = file.path(
+            FIGURES_DIR, 
+            sprintf(
+              "classification_%s_%s_%s_imputed_comparison.pdf", 
+              split_mode, metric, impute_mode
+            )
+          ),
+          width = 10,
+          height = 6
+        )
+      }
     }
   }
-}
-
-# look specifically at mean, max, recent labs validation AUROC
-plt_df <- errs_df_long |>
-  dplyr::filter(
-    split_mode == "validation",
-    is.na(censor_switcher),
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only",
-    metric == "auroc"
-  ) |>
-  dplyr::group_by(
-    method, censor_switcher, impute_mode,
-    forecast, forecast_name, accrual, accrual_name, varset_mode, metric
-  ) |>
-  dplyr::summarise(
-    mean_estimate = mean(estimate),
-    sd_estimate = sd(estimate),
-    se_estimate = sd(estimate) / sqrt(dplyr::n()),
-    n_estimate = dplyr::n(),
-    .groups = "drop"
-  ) |>
-  dplyr::mutate(
-    method_type = dplyr::case_when(
-      method %in% c("RF", "GBDT") ~ "tree",
-      method %in% c("Lasso", "Ridge", "Elastic Net", "Logistic") ~ "linear",
-      TRUE ~ method
+  
+  # look specifically at mean, max, recent labs validation AUROC
+  plt_df <- errs_df_long |>
+    dplyr::filter(
+      split_mode == "validation",
+      is.na(censor_switcher),
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only",
+      metric == "auroc"
+    ) |>
+    dplyr::group_by(
+      method, censor_switcher, impute_mode,
+      forecast, forecast_name, accrual, accrual_name, varset_mode, metric
+    ) |>
+    dplyr::summarise(
+      mean_estimate = mean(estimate),
+      sd_estimate = sd(estimate),
+      se_estimate = sd(estimate) / sqrt(dplyr::n()),
+      n_estimate = dplyr::n(),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      method_type = dplyr::case_when(
+        method %in% c("RF", "GBDT") ~ "tree",
+        method %in% c("Lasso", "Ridge", "Elastic Net", "Logistic") ~ "linear",
+        TRUE ~ method
+      )
     )
-  )
-plt <- plt_df |>
-  ggplot2::ggplot() +
-  ggplot2::geom_point(
-    ggplot2::aes(x = method, y = mean_estimate, color = method_type)
-  ) +
-  ggplot2::geom_errorbar(
-    ggplot2::aes(
-      x = method,
-      ymin = mean_estimate - se_estimate,
-      ymax = mean_estimate + se_estimate,
-      color = method_type
+  plt <- plt_df |>
+    ggplot2::ggplot() +
+    ggplot2::geom_point(
+      ggplot2::aes(x = method, y = mean_estimate, color = method_type)
+    ) +
+    ggplot2::geom_errorbar(
+      ggplot2::aes(
+        x = method,
+        ymin = mean_estimate - se_estimate,
+        ymax = mean_estimate + se_estimate,
+        color = method_type
+      ),
+      width = 0
+    ) +
+    ggplot2::facet_grid(accrual_name ~ forecast_name, scales = "free") +
+    ggplot2::labs(
+      x = "Method",
+      y = "AUROC"
+    ) +
+    ggplot2::scale_color_manual(
+      values = c("grey70", "#F8766D", "black", "#14CED3")
+    ) +
+    vthemes::theme_vmodern(size_preset = "medium") +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(
+        size = 12, angle = 90, hjust = 1, vjust = 0.5
+      )
+    ) +
+    ggplot2::guides(color = "none")
+  ggplot2::ggsave(
+    plt,
+    filename = file.path(
+      FIGURES_DIR, 
+      sprintf(
+        "classification_validation_%s_imputed_recent_mean_max_labs_auroc.pdf",
+        impute_mode
+      )
     ),
-    width = 0
-  ) +
-  ggplot2::facet_grid(accrual_name ~ forecast_name, scales = "free") +
-  ggplot2::labs(
-    x = "Method",
-    y = "AUROC"
-  ) +
-  ggplot2::scale_color_manual(
-    values = c("grey70", "#F8766D", "black", "#14CED3")
-  ) +
-  vthemes::theme_vmodern(size_preset = "medium") +
-  ggplot2::theme(
-    axis.text.x = ggplot2::element_text(
-      size = 12, angle = 90, hjust = 1, vjust = 0.5
-    )
-  ) +
-  ggplot2::guides(color = "none")
-ggplot2::ggsave(
-  plt,
-  filename = file.path(
-    FIGURES_DIR, 
-    "classification_validation_recent_mean_max_labs_auroc.pdf"
-  ),
-  width = 7,
-  height = 5
-)
+    width = 7,
+    height = 5
+  )
+}
 
 #### sensitivity/specificity at best cutoffs ####
 cutoffs_df <- load_classification_results(
@@ -785,429 +828,462 @@ errs_df <- load_classification_results(
     )
   )
 
-test_errs_df <- errs_df |>
-  dplyr::filter(
-    split_mode == "test",
-    method == "RF+",
-    is.na(censor_switcher),
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only"
-  ) |>
-  dplyr::group_by(
-    method, censor_switcher, impute_mode, split_mode,
-    forecast, forecast_name, accrual, accrual_name, varset_mode
-  ) |>
-  dplyr::summarise(
-    dplyr::across(
-      c(auroc, auprc, sensitivity, specificity, thr),
-      list(
-        mean = ~ sprintf("%.2f (%.2f)", mean(.x), sd(.x)),
-        ci = ~ sprintf("(%.2f, %.2f)", quantile(.x, 0.025), quantile(.x, 0.975))
-      )
-    ),
-    .groups = "drop"
-  ) |>
-  dplyr::select(
-    `Forecast (months)` = forecast,
-    `Accrual (years)` = accrual,
-    auroc_mean:thr_ci
+for (impute_mode in c("rf", "mean", "median")) {
+  impute_mode_name <- dplyr::case_when(
+    impute_mode == "rf" ~ "RF",
+    TRUE ~ stringr::str_to_title(impute_mode)
   )
-class_prop_df <- readRDS(file.path(CLASS_RESULTS_DIR, "class_proportions.rds"))
-
-kab_df <- dplyr::left_join(
-  class_prop_df |>
-    dplyr::mutate(
-      forecast = as.integer(forecast),
-      accrual = as.integer(accrual),
-      class_prop = sprintf("%.2f", class_prop)
+  nreps <- dplyr::case_when(
+    impute_mode == "rf" ~ 50,
+    TRUE ~ 20
+  )
+  test_errs_df <- errs_df |>
+    dplyr::filter(
+      split_mode == "test",
+      method == "RF+",
+      is.na(censor_switcher),
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only"
+    ) |>
+    dplyr::group_by(
+      method, censor_switcher, impute_mode, split_mode,
+      forecast, forecast_name, accrual, accrual_name, varset_mode
+    ) |>
+    dplyr::summarise(
+      dplyr::across(
+        c(auroc, auprc, sensitivity, specificity, thr),
+        list(
+          mean = ~ sprintf("%.2f (%.2f)", mean(.x), sd(.x)),
+          ci = ~ sprintf("(%.2f, %.2f)", quantile(.x, 0.025), quantile(.x, 0.975))
+        )
+      ),
+      .groups = "drop"
     ) |>
     dplyr::select(
-      `Forecast (months)` = forecast, `Accrual (years)` = accrual, class_prop
-    ),
-  test_errs_df,
-  by = c("Forecast (months)", "Accrual (years)")
-)
-kab <- vthemes::pretty_kable(
-  kab_df,
-  col.names = c(
-    "Forecast<br>(months)", "Accrual<br>(years)", "Prop.<br>Flares",
-    rep(c("Mean (SD)", "95% CI"), 5)
+      `Forecast (months)` = forecast,
+      `Accrual (years)` = accrual,
+      auroc_mean:thr_ci
+    )
+  class_prop_df <- readRDS(file.path(CLASS_RESULTS_DIR, "class_proportions.rds"))
+
+  kab_df <- dplyr::left_join(
+    class_prop_df |>
+      dplyr::mutate(
+        forecast = as.integer(forecast),
+        accrual = as.integer(accrual),
+        class_prop = sprintf("%.2f", class_prop)
+      ) |>
+      dplyr::select(
+        `Forecast (months)` = forecast, `Accrual (years)` = accrual, class_prop
+      ),
+    test_errs_df,
+    by = c("Forecast (months)", "Accrual (years)")
   )
-) |>
-  kableExtra::add_header_above(
-    c(
-      " " = 3, 
-      "AUROC" = 2, 
-      "AUPRC" = 2, 
-      "Sensitivity" = 2, 
-      "Specificity" = 2, 
-      "Threshold" = 2
+  kab <- vthemes::pretty_kable(
+    kab_df,
+    col.names = c(
+      "Forecast<br>(months)", "Accrual<br>(years)", "Prop.<br>Flares",
+      rep(c("Mean (SD)", "95% CI"), 5)
+    ),
+    caption = sprintf(
+      "Summary of test prediction performance using %s imputation and the best model (i.e., RF+) for different forecasting and accrual periods. Performance metrics shown include the area under the receiver operating characteristic curve (AUROC), area under the precision-recall curve (AUPRC), and the optimal sensitivity, specificity, and corresponding probability threshold (i.e., the point on the ROC curve closest to the top-left corner). Results are summarized across %s random training-validation-test splits. We also provide the proportion of patients who flared in the study population. This proportion is the baseline AUPRC value (i.e., the AUPRC from a model with no predictive power).",
+      impute_mode_name, nreps
     )
   ) |>
-  kableExtra::kable_paper() #> exported as image (1250 x 453)
-saveRDS(
-  kab,
-  file = file.path(FIGURES_DIR, "test_errors_table.rds")
-)
+    kableExtra::add_header_above(
+      c(
+        " " = 3, 
+        "AUROC" = 2, 
+        "AUPRC" = 2, 
+        "Sensitivity" = 2, 
+        "Specificity" = 2, 
+        "Threshold" = 2
+      )
+    ) |>
+    kableExtra::kable_paper() #> exported as image (1250 x 453)
+  saveRDS(
+    kab,
+    file = file.path(
+      FIGURES_DIR, sprintf("test_errors_table_%s_imputed.rds", impute_mode)
+    )
+  )
+}
 
 #### calibration ####
-calibration_df <- load_classification_results(
-  test_fname = "test_calibration_results.csv"
-) |>
-  dplyr::filter(
-    method == "RF+",
-    is.na(censor_switcher),
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only",
-    split_mode == "test"
-  )
-
-plt_df <- calibration_df |>
-  dplyr::group_by(
-    method, quantile, censor_switcher, impute_mode,
-    forecast, forecast_name, accrual, accrual_name, varset_mode, split_mode
+for (impute_mode in c("rf", "mean", "median")) {
+  calibration_df <- load_classification_results(
+    test_fname = "test_calibration_results.csv"
   ) |>
-  dplyr::summarise(
-    num_flares = mean(num_flares),
-    predicted_flares = mean(predicted_flares),
-    .groups = "drop"
+    dplyr::filter(
+      method == "RF+",
+      is.na(censor_switcher),
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only",
+      split_mode == "test"
+    )
+  
+  plt_df <- calibration_df |>
+    dplyr::group_by(
+      method, quantile, censor_switcher, impute_mode,
+      forecast, forecast_name, accrual, accrual_name, varset_mode, split_mode
+    ) |>
+    dplyr::summarise(
+      num_flares = mean(num_flares),
+      predicted_flares = mean(predicted_flares),
+      .groups = "drop"
+    )
+  
+  plt <- plt_df |>
+    ggplot2::ggplot() +
+    ggplot2::aes(
+      x = num_flares, 
+      y = predicted_flares, 
+      color = as.factor(forecast), 
+      shape = as.factor(accrual)
+    ) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    ggplot2::labs(
+      x = "Number of Observed Flares", 
+      y = "Number of Predicted Flares",
+      color = "Forecast (mo)",
+      shape = "Accrual (yr)"
+    ) +
+    vthemes::theme_vmodern(size_preset = "medium")
+  
+  ggplot2::ggsave(
+    plt,
+    filename = file.path(
+      FIGURES_DIR, 
+      sprintf("calibration_%s_imputed_plot.pdf", impute_mode)
+    ),
+    height = 4,
+    width = 6
   )
-
-plt <- plt_df |>
-  ggplot2::ggplot() +
-  ggplot2::aes(
-    x = num_flares, 
-    y = predicted_flares, 
-    color = as.factor(forecast), 
-    shape = as.factor(accrual)
-  ) +
-  ggplot2::geom_point(size = 3) +
-  ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-  ggplot2::labs(
-    x = "Number of Observed Flares", 
-    y = "Number of Predicted Flares",
-    color = "Forecast (mo)",
-    shape = "Accrual (yr)"
-  ) +
-  vthemes::theme_vmodern(size_preset = "medium")
-
-ggplot2::ggsave(
-  plt,
-  filename = file.path(FIGURES_DIR, "calibration_plot.pdf"),
-  height = 4,
-  width = 6
-)
+}
 
 #### decision curve analysis ####
-dca_df <- load_classification_results(test_fname = "test_dca_results.csv") |>
-  dplyr::filter(
-    is.na(censor_switcher), 
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only"
-  )
-
-best_cutoffs <- load_classification_results(
-  test_fname = "test_best_cutoff_results.csv"
-) |>
-  dplyr::filter(
-    is.na(censor_switcher), 
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only",
-    method == "RF+"
+for (impute_mode in c("rf", "mean", "median")) {
+  dca_df <- load_classification_results(test_fname = "test_dca_results.csv") |>
+    dplyr::filter(
+      is.na(censor_switcher), 
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only"
+    )
+  
+  best_cutoffs <- load_classification_results(
+    test_fname = "test_best_cutoff_results.csv"
   ) |>
-  dplyr::group_by(
-    method, censor_switcher, impute_mode,
-    forecast, forecast_name, accrual, accrual_name, varset_mode
-  ) |>
-  dplyr::summarise(
-    sensitivity = mean(sensitivity),
-    specificity = mean(specificity),
-    thr = mean(thr),
-    .groups = "drop"
-  ) |>
-  dplyr::rename(model = method)
-
-plt_df <- dca_df |>
-  dplyr::group_by(
-    model, threshold, method, censor_switcher, impute_mode, 
-    forecast, forecast_name, accrual, accrual_name, varset_mode
-  ) |>
-  dplyr::summarise(
-    net_benefit = mean(net_benefit),
-    net_benefit_sd = sd(net_benefit),
-    net_benefit_se = sd(net_benefit) / sqrt(dplyr::n()),
-    net_benefit_n = dplyr::n(),
-    .groups = "drop"
-  )
-
-plt <- plt_df |>
-  dplyr::filter(
-    !(method == "Logistic" & model != "pred"),
-    threshold <= 0.35,
-    net_benefit >= -0.1
-  ) |>
-  dplyr::mutate(
-    model = dplyr::case_when(
-      model == "all" ~ "Treat All",
-      model == "none" ~ "Treat None",
-      method == "Logistic" ~ "Logistic Model",
-      method == "RF+" ~ "RF+ Model"
+    dplyr::filter(
+      is.na(censor_switcher), 
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only",
+      method == "RF+"
     ) |>
-      factor(
-        levels = c("RF+ Model", "Logistic Model", "Treat All", "Treat None")
+    dplyr::group_by(
+      method, censor_switcher, impute_mode,
+      forecast, forecast_name, accrual, accrual_name, varset_mode
+    ) |>
+    dplyr::summarise(
+      sensitivity = mean(sensitivity),
+      specificity = mean(specificity),
+      thr = mean(thr),
+      .groups = "drop"
+    ) |>
+    dplyr::rename(model = method)
+  
+  plt_df <- dca_df |>
+    dplyr::group_by(
+      model, threshold, method, censor_switcher, impute_mode, 
+      forecast, forecast_name, accrual, accrual_name, varset_mode
+    ) |>
+    dplyr::summarise(
+      net_benefit = mean(net_benefit),
+      net_benefit_sd = sd(net_benefit),
+      net_benefit_se = sd(net_benefit) / sqrt(dplyr::n()),
+      net_benefit_n = dplyr::n(),
+      .groups = "drop"
+    )
+  
+  plt <- plt_df |>
+    dplyr::filter(
+      !(method == "Logistic" & model != "pred"),
+      threshold <= 0.35,
+      net_benefit >= -0.1
+    ) |>
+    dplyr::mutate(
+      model = dplyr::case_when(
+        model == "all" ~ "Treat All",
+        model == "none" ~ "Treat None",
+        method == "Logistic" ~ "Logistic Model",
+        method == "RF+" ~ "RF+ Model"
+      ) |>
+        factor(
+          levels = c("RF+ Model", "Logistic Model", "Treat All", "Treat None")
+        )
+    ) |>
+    ggplot2::ggplot() +
+    ggplot2::geom_line(
+      ggplot2::aes(
+        x = threshold, y = net_benefit, color = model
       )
-  ) |>
-  ggplot2::ggplot() +
-  ggplot2::geom_line(
-    ggplot2::aes(
-      x = threshold, y = net_benefit, color = model
-    )
-  ) +
-  ggplot2::geom_vline(
-    ggplot2::aes(xintercept = thr),
-    data = best_cutoffs,
-    linetype = "dotted"
-  ) +
-  ggplot2::facet_grid(accrual_name ~ forecast_name) + 
-  ggplot2::scale_color_manual(
-    values = c(
-      "black", "#F8766D", "#619CFF", "#00BA38"
-    )
-  ) +
-  ggplot2::coord_cartesian(expand = FALSE) +
-  ggplot2::labs(
-    x = "Threshold Probability",
-    y = "Net Benefit",
-    color = ""
-  ) +
-  vthemes::theme_vmodern(size_preset = "medium")
-ggplot2::ggsave(
-  plt, 
-  filename = file.path(FIGURES_DIR, "dca_all.pdf"),
-  width = 8,
-  height = 5
-)
+    ) +
+    ggplot2::geom_vline(
+      ggplot2::aes(xintercept = thr),
+      data = best_cutoffs,
+      linetype = "dotted"
+    ) +
+    ggplot2::facet_grid(accrual_name ~ forecast_name) + 
+    ggplot2::scale_color_manual(
+      values = c(
+        "black", "#F8766D", "#619CFF", "#00BA38"
+      )
+    ) +
+    ggplot2::coord_cartesian(expand = FALSE) +
+    ggplot2::labs(
+      x = "Threshold Probability",
+      y = "Net Benefit",
+      color = ""
+    ) +
+    vthemes::theme_vmodern(size_preset = "medium")
+  ggplot2::ggsave(
+    plt, 
+    filename = file.path(
+      FIGURES_DIR,
+      sprintf("dca_%s_imputed_all.pdf", impute_mode)
+    ),
+    width = 8,
+    height = 5
+  )
+}
 
 #### feature importances ####
-vimps_df <- load_classification_results(
-  test_fname = "test_importances.csv"
-) |>
-  dplyr::filter(
-    is.na(censor_switcher),
-    impute_mode == "rf",
-    varset_mode == "Mean, Max, Recent Labs Only"
+for (impute_mode in c("rf", "mean", "median")) {
+  vimps_df <- load_classification_results(
+    test_fname = "test_importances.csv"
   ) |>
-  dplyr::mutate(
-    var = rename_variables(var)
-  )
-rfplus_vimps_df <- vimps_df |>
-  dplyr::filter(
-    method == "RF+"
-  ) |>
-  tidyr::pivot_longer(
-    cols = c(importance, importance0, importance1),
-    names_to = "metric",
-    values_to = "importance"
-  )
-
-# RF+ Importance
-plt_ls <- list()
-for (forecast in c(3, 6, 12)) {
-  for (accrual in c(1, 2)) {
-    plt_name <- sprintf(
-      "Accrual = %syr, Forecast = %smo", accrual, forecast
+    dplyr::filter(
+      is.na(censor_switcher),
+      impute_mode == !!impute_mode,
+      varset_mode == "Mean, Max, Recent Labs Only"
+    ) |>
+    dplyr::mutate(
+      var = rename_variables(var)
     )
-    plt_df <- rfplus_vimps_df |>
-      dplyr::filter(
-        forecast == !!forecast,
-        accrual == !!accrual
-      ) |>
-      dplyr::group_by(
-        forecast_name, accrual_name, var, metric
-      ) |>
-      dplyr::summarise(
-        mean_importance = mean(importance),
-        sd_importance = sd(importance),
-        se_importance = sd(importance) / sqrt(dplyr::n()),
-        .groups = "drop"
-      ) |>
-      dplyr::mutate(
-        importance_mode = dplyr::case_when(
-          is.na(stringr::str_extract(metric, "[0-9]+")) ~ "Total",
-          stringr::str_extract(metric, "[0-9]+") == "0" ~ "Nonlinear",
-          stringr::str_extract(metric, "[0-9]+") == "1" ~ "Linear"
+  rfplus_vimps_df <- vimps_df |>
+    dplyr::filter(
+      method == "RF+"
+    ) |>
+    tidyr::pivot_longer(
+      cols = c(importance, importance0, importance1),
+      names_to = "metric",
+      values_to = "importance"
+    )
+  
+  # RF+ Importance
+  plt_ls <- list()
+  for (forecast in c(3, 6, 12)) {
+    for (accrual in c(1, 2)) {
+      plt_name <- sprintf(
+        "Accrual = %syr, Forecast = %smo", accrual, forecast
+      )
+      plt_df <- rfplus_vimps_df |>
+        dplyr::filter(
+          forecast == !!forecast,
+          accrual == !!accrual
         ) |>
-          factor(levels = c("Total", "Linear", "Nonlinear"))
-      )
-    var_order <- plt_df |>
-      dplyr::filter(importance_mode == "Total") |>
-      dplyr::arrange(-mean_importance) |>
-      dplyr::pull(var)
-    plt_ls[[plt_name]] <- plt_df |>
-      dplyr::mutate(
-        var = factor(var, levels = rev(var_order[1:15]))
-      ) |>
-      dplyr::filter(
-        !is.na(var)
-      ) |>
-      ggplot2::ggplot() +
-      ggplot2::geom_point(
-        ggplot2::aes(
-          x = var,
-          y = mean_importance,
-          color = importance_mode
+        dplyr::group_by(
+          forecast_name, accrual_name, var, metric
+        ) |>
+        dplyr::summarise(
+          mean_importance = mean(importance),
+          sd_importance = sd(importance),
+          se_importance = sd(importance) / sqrt(dplyr::n()),
+          .groups = "drop"
+        ) |>
+        dplyr::mutate(
+          importance_mode = dplyr::case_when(
+            is.na(stringr::str_extract(metric, "[0-9]+")) ~ "Total",
+            stringr::str_extract(metric, "[0-9]+") == "0" ~ "Nonlinear",
+            stringr::str_extract(metric, "[0-9]+") == "1" ~ "Linear"
+          ) |>
+            factor(levels = c("Total", "Linear", "Nonlinear"))
         )
-      ) +
-      ggplot2::geom_errorbar(
-        ggplot2::aes(
-          x = var,
-          ymin = mean_importance - se_importance,
-          ymax = mean_importance + se_importance,
-          color = importance_mode
-        ),
-        width = 0
-      ) +
-      ggplot2::scale_color_manual(
-        values = c("black", "#F8766D", "#14CED3")
-      ) +
-      ggplot2::facet_grid(accrual_name ~ forecast_name) +
-      ggplot2::labs(
-        x = "Variable", 
-        y = "MDI+ Importance", 
-        color = "Importance"
-      ) +
-      ggplot2::coord_flip() +
-      vthemes::theme_vmodern(
-        size_preset = "large"
-      )
-    if (accrual == 2) {
-      plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
-        ggplot2::theme(
-          strip.text.x = ggplot2::element_blank(),
-          strip.background.x = ggplot2::element_blank()
+      var_order <- plt_df |>
+        dplyr::filter(importance_mode == "Total") |>
+        dplyr::arrange(-mean_importance) |>
+        dplyr::pull(var)
+      plt_ls[[plt_name]] <- plt_df |>
+        dplyr::mutate(
+          var = factor(var, levels = rev(var_order[1:15]))
+        ) |>
+        dplyr::filter(
+          !is.na(var)
+        ) |>
+        ggplot2::ggplot() +
+        ggplot2::geom_point(
+          ggplot2::aes(
+            x = var,
+            y = mean_importance,
+            color = importance_mode
+          )
+        ) +
+        ggplot2::geom_errorbar(
+          ggplot2::aes(
+            x = var,
+            ymin = mean_importance - se_importance,
+            ymax = mean_importance + se_importance,
+            color = importance_mode
+          ),
+          width = 0
+        ) +
+        ggplot2::scale_color_manual(
+          values = c("black", "#F8766D", "#14CED3")
+        ) +
+        ggplot2::facet_grid(accrual_name ~ forecast_name) +
+        ggplot2::labs(
+          x = "Variable", 
+          y = "MDI+ Importance", 
+          color = "Importance"
+        ) +
+        ggplot2::coord_flip() +
+        vthemes::theme_vmodern(
+          size_preset = "large"
         )
-    }
-    if (forecast != 12) {
-      plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
-        ggplot2::theme(
-          strip.text.y = ggplot2::element_blank(),
-          strip.background.y = ggplot2::element_blank()
-        )
+      if (accrual == 2) {
+        plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
+          ggplot2::theme(
+            strip.text.x = ggplot2::element_blank(),
+            strip.background.x = ggplot2::element_blank()
+          )
+      }
+      if (forecast != 12) {
+        plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
+          ggplot2::theme(
+            strip.text.y = ggplot2::element_blank(),
+            strip.background.y = ggplot2::element_blank()
+          )
+      }
     }
   }
-}
-
-plt <- patchwork::wrap_plots(
-  plt_ls, nrow = 2, ncol = 3, byrow = FALSE, guides = "collect"
-) +
-  patchwork::plot_layout(axis_titles = "collect")
-ggplot2::ggsave(
-  plt,
-  filename = file.path(
-    FIGURES_DIR, "rfplus_importances_linear_v_nonlinear.pdf"
-  ),
-  height = 8,
-  width = 20
-)
-
-# Importance across methods
-vimps_rank_df <- vimps_df |>
-  dplyr::group_by(
-    method, censor_switcher, impute_mode, varset_mode,
-    forecast, forecast_name, accrual, accrual_name, split_mode, var
-  ) |>
-  dplyr::summarise(
-    importance_mean = mean(importance),
-    .groups = "drop"
-  ) |>
-  dplyr::group_by(
-    method, censor_switcher, impute_mode, varset_mode,
-    forecast, forecast_name, accrual, accrual_name, split_mode
-  ) |>
-  dplyr::mutate(
-    importance_rank = rank(-importance_mean)
+  
+  plt <- patchwork::wrap_plots(
+    plt_ls, nrow = 2, ncol = 3, byrow = FALSE, guides = "collect"
+  ) +
+    patchwork::plot_layout(axis_titles = "collect")
+  ggplot2::ggsave(
+    plt,
+    filename = file.path(
+      FIGURES_DIR, 
+      sprintf(
+        "rfplus_importances_linear_v_nonlinear_%s_imputed.pdf", 
+        impute_mode
+      )
+    ),
+    height = 8,
+    width = 20
   )
-
-plt_ls <- list()
-for (forecast in c(3, 6, 12)) {
-  for (accrual in c(1, 2)) {
-    plt_name <- sprintf(
-      "Accrual = %syr, Forecast = %smo", accrual, forecast
+  
+  # Importance across methods
+  vimps_rank_df <- vimps_df |>
+    dplyr::group_by(
+      method, censor_switcher, impute_mode, varset_mode,
+      forecast, forecast_name, accrual, accrual_name, split_mode, var
+    ) |>
+    dplyr::summarise(
+      importance_mean = mean(importance),
+      .groups = "drop"
+    ) |>
+    dplyr::group_by(
+      method, censor_switcher, impute_mode, varset_mode,
+      forecast, forecast_name, accrual, accrual_name, split_mode
+    ) |>
+    dplyr::mutate(
+      importance_rank = rank(-importance_mean)
     )
-    plt_df <- vimps_rank_df |>
-      dplyr::filter(
-        forecast == !!forecast,
-        accrual == !!accrual
+  
+  plt_ls <- list()
+  for (forecast in c(3, 6, 12)) {
+    for (accrual in c(1, 2)) {
+      plt_name <- sprintf(
+        "Accrual = %syr, Forecast = %smo", accrual, forecast
       )
-    var_order <- plt_df |>
-      dplyr::filter(method == "RF+") |>
-      dplyr::arrange(importance_rank) |>
-      dplyr::pull(var)
-    plt_ls[[plt_name]] <- plt_df |>
-      dplyr::mutate(
-        var = factor(var, levels = rev(var_order[1:10]))
-      ) |>
-      dplyr::filter(
-        !is.na(var)
-      ) |>
-      ggplot2::ggplot() +
-      ggplot2::aes(
-        x = method, y = var, fill = importance_rank, label = importance_rank
-      ) +
-      ggplot2::geom_tile() +
-      ggplot2::geom_text(size = 3) +
-      ggplot2::facet_grid(accrual_name ~ forecast_name) +
-      ggplot2::labs(
-        x = "Method", 
-        y = "Variable", 
-        fill = "Variable\nImportance\nRank"
-      ) +
-      viridis::scale_fill_viridis(
-        option = "magma", direction = -1, limits = c(1, 50),
-        guide = ggplot2::guide_colorbar(reverse = TRUE),
-        begin = 0.2
-      ) +
-      ggplot2::coord_cartesian(expand = FALSE) +
-      vthemes::theme_vmodern(
-        size_preset = "large"
-      ) +
-      ggplot2::theme(
-        axis.text.x = ggplot2::element_text(
-          size = 12, angle = 90, hjust = 1, vjust = 0.5
-        ),
-        panel.border = ggplot2::element_rect(
-          color = "black", fill = NA, linewidth = 1
+      plt_df <- vimps_rank_df |>
+        dplyr::filter(
+          forecast == !!forecast,
+          accrual == !!accrual
         )
-      )
-    if (accrual == 2) {
-      plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
+      var_order <- plt_df |>
+        dplyr::filter(method == "RF+") |>
+        dplyr::arrange(importance_rank) |>
+        dplyr::pull(var)
+      plt_ls[[plt_name]] <- plt_df |>
+        dplyr::mutate(
+          var = factor(var, levels = rev(var_order[1:10]))
+        ) |>
+        dplyr::filter(
+          !is.na(var)
+        ) |>
+        ggplot2::ggplot() +
+        ggplot2::aes(
+          x = method, y = var, fill = importance_rank, label = importance_rank
+        ) +
+        ggplot2::geom_tile() +
+        ggplot2::geom_text(size = 3) +
+        ggplot2::facet_grid(accrual_name ~ forecast_name) +
+        ggplot2::labs(
+          x = "Method", 
+          y = "Variable", 
+          fill = "Variable\nImportance\nRank"
+        ) +
+        viridis::scale_fill_viridis(
+          option = "magma", direction = -1, limits = c(1, 50),
+          guide = ggplot2::guide_colorbar(reverse = TRUE),
+          begin = 0.2
+        ) +
+        ggplot2::coord_cartesian(expand = FALSE) +
+        vthemes::theme_vmodern(
+          size_preset = "large"
+        ) +
         ggplot2::theme(
-          strip.text.x = ggplot2::element_blank(),
-          strip.background.x = ggplot2::element_blank()
+          axis.text.x = ggplot2::element_text(
+            size = 12, angle = 90, hjust = 1, vjust = 0.5
+          ),
+          panel.border = ggplot2::element_rect(
+            color = "black", fill = NA, linewidth = 1
+          )
         )
-    }
-    if (forecast != 12) {
-      plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
-        ggplot2::theme(
-          strip.text.y = ggplot2::element_blank(),
-          strip.background.y = ggplot2::element_blank()
-        )
+      if (accrual == 2) {
+        plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
+          ggplot2::theme(
+            strip.text.x = ggplot2::element_blank(),
+            strip.background.x = ggplot2::element_blank()
+          )
+      }
+      if (forecast != 12) {
+        plt_ls[[plt_name]] <- plt_ls[[plt_name]] +
+          ggplot2::theme(
+            strip.text.y = ggplot2::element_blank(),
+            strip.background.y = ggplot2::element_blank()
+          )
+      }
     }
   }
+  
+  plt <- patchwork::wrap_plots(
+    plt_ls, nrow = 2, ncol = 3, byrow = FALSE, guides = "collect"
+  ) +
+    patchwork::plot_layout(axis_titles = "collect")
+  ggplot2::ggsave(
+    plt,
+    filename = file.path(
+      FIGURES_DIR, 
+      sprintf("importances_%s_imputed_summary.pdf", impute_mode)
+    ),
+    height = 9,
+    width = 18
+  )
 }
-
-plt <- patchwork::wrap_plots(
-  plt_ls, nrow = 2, ncol = 3, byrow = FALSE, guides = "collect"
-) +
-  patchwork::plot_layout(axis_titles = "collect")
-ggplot2::ggsave(
-  plt,
-  filename = file.path(
-    FIGURES_DIR, "importances_summary.pdf"
-  ),
-  height = 9,
-  width = 18
-)
 
 #### partial dependence plots ####
 varset_mode <- "recent_mean_max_labs"
@@ -1225,6 +1301,34 @@ features <- c(
   "# Flares Pre-IFX" = "n_flares_preifx",
   "Mean CO2" = "mean_lab_value_accrual_co2"
 )
+
+vimps_df <- load_classification_results(
+  test_fname = "test_importances.csv"
+) |>
+  dplyr::filter(
+    is.na(censor_switcher),
+    varset_mode == "Mean, Max, Recent Labs Only"
+  ) |>
+  dplyr::mutate(
+    var = rename_variables(var)
+  )
+vimps_rank_df <- vimps_df |>
+  dplyr::group_by(
+    method, censor_switcher, impute_mode, varset_mode,
+    forecast, forecast_name, accrual, accrual_name, split_mode, var
+  ) |>
+  dplyr::summarise(
+    importance_mean = mean(importance),
+    .groups = "drop"
+  ) |>
+  dplyr::group_by(
+    method, censor_switcher, impute_mode, varset_mode,
+    forecast, forecast_name, accrual, accrual_name, split_mode
+  ) |>
+  dplyr::mutate(
+    importance_rank = rank(-importance_mean)
+  )
+
 plt_ls_all <- list()
 for (forecast in c(3, 6, 12)) {
   for (accrual in c(1, 2)) {
@@ -1235,7 +1339,8 @@ for (forecast in c(3, 6, 12)) {
       dplyr::filter(
         method == "RF+",
         accrual == !!accrual,
-        forecast == !!forecast
+        forecast == !!forecast,
+        impute_mode == !!impute_mode
       ) |>
       dplyr::arrange(importance_rank) |>
       dplyr::pull(var)
@@ -1248,27 +1353,49 @@ for (forecast in c(3, 6, 12)) {
       for (seed in seeds) {
         pdp_df <- data.table::fread(
           file.path(
-            CLASS_RESULTS_DIR,
+            "/scratch/awaljee_root/awaljee99/tmtang/Biosimilar-project/results_copy/classification_models_final_v2",
             sprintf(
-              "classification_accrual_%syr_forecast_%smo%s_%s_imputed_rep%s",
-              accrual, forecast, censor_switcher, impute_mode, seed
-            ),
-            sprintf("test_%s_pdp_%s.csv", varset_mode, feature)
+              "classification_rolling_wi_accrual_%syr_forecast_%smo_rf_imputed_rep%s", 
+              accrual, forecast, seed
+            ), 
+            sprintf("pdp_%s_%s_seed%s.csv", varset_mode, feature, seed)
           )
         ) |>
           tibble::as_tibble()
-        
         X <- data.table::fread(
           file.path(
-            DATA_DIR,
-            "classification_data",
+            "/scratch/awaljee_root/awaljee99/tmtang/Biosimilar-project/data/processed_final",
             sprintf(
-              "classification_accrual_%syr_forecast_%smo%s_%s_imputed_rep%s.csv",
-              accrual, forecast, censor_switcher, impute_mode, seed
+              "classification_rolling_wi_accrual_%syr_forecast_%smo_rf_imputed_rep%s.csv", 
+              accrual, forecast, seed
             )
           )
         ) |>
           tibble::as_tibble()
+        
+        # pdp_df <- data.table::fread(
+        #   file.path(
+        #     CLASS_RESULTS_DIR,
+        #     sprintf(
+        #       "classification_accrual_%syr_forecast_%smo%s_%s_imputed_rep%s",
+        #       accrual, forecast, censor_switcher, impute_mode, seed
+        #     ),
+        #     sprintf("test_%s_pdp_%s.csv", varset_mode, feature)
+        #   )
+        # ) |>
+        #   tibble::as_tibble()
+        # 
+        # X <- data.table::fread(
+        #   file.path(
+        #     DATA_DIR,
+        #     "classification_data",
+        #     sprintf(
+        #       "classification_accrual_%syr_forecast_%smo%s_%s_imputed_rep%s.csv",
+        #       accrual, forecast, censor_switcher, impute_mode, seed
+        #     )
+        #   )
+        # ) |>
+        #   tibble::as_tibble()
         feature_data <- X[[feature]]
         x_mean <- mean(feature_data)
         x_sd <- sd(feature_data)
@@ -1291,38 +1418,52 @@ for (forecast in c(3, 6, 12)) {
       plt_df <- plt_df |>
         dplyr::group_by(seed) |>
         dplyr::summarise(
-          imputed_pdp = approx(
-            x = orig_grid_values, 
-            y = average, 
-            xout = common_grid_values
-          ) |>
-            tibble::as_tibble() |>
-            list(),
-          .groups = "drop"
+          imputed_pdp = list(
+            purrr::map(
+              common_grid_values,
+              function(grid_value) {
+                idx <- which(orig_grid_values > grid_value)[1]
+                if (is.na(idx)) {
+                  idx <- length(orig_grid_values)
+                } else if (idx == 1) {
+                  idx <- 2
+                }
+                slope <- (average[idx] - average[idx - 1]) /
+                  (orig_grid_values[idx] - orig_grid_values[idx - 1])
+                val <- average[idx - 1] + 
+                  slope * (grid_value - orig_grid_values[idx - 1])
+                return(
+                  tibble::tibble_row(
+                    orig_grid_values = grid_value,
+                    average = val
+                  )
+                )
+              }
+            ) |>
+              dplyr::bind_rows()
+          )
         ) |>
         tidyr::unnest(cols = imputed_pdp) |>
-        dplyr::group_by(x) |>
+        dplyr::group_by(orig_grid_values) |>
         dplyr::summarise(
-          mean = mean(y, na.rm = TRUE),
-          lo = quantile(y, 0.025, na.rm = TRUE),
-          hi = quantile(y, 0.975, na.rm = TRUE)
+          mean = mean(average),
+          lo = quantile(average, 0.025),
+          hi = quantile(average, 0.975)
         )
       
       plt_ls[[feature]] <- plt_df |>
         ggplot2::ggplot() +
         ggplot2::aes(
-          x = x,
+          x = orig_grid_values,
           y = mean
         ) +
         ggplot2::geom_line() +
         ggplot2::geom_ribbon(
-          ggplot2::aes(x = x, ymin = lo, ymax = hi),
+          ggplot2::aes(x = orig_grid_values, ymin = lo, ymax = hi),
           alpha = 0.2
         ) +
         ggplot2::geom_rug(
-          ggplot2::aes(
-            x = .data[[feature]]
-          ),
+          ggplot2::aes(x = .data[[feature]]),
           inherit.aes = FALSE,
           data = dplyr::bind_rows(Xs_ls),
           alpha = 1 / length(seeds) * 0.2
@@ -1331,7 +1472,7 @@ for (forecast in c(3, 6, 12)) {
           x = feature_name, 
           y = "Predicted Risk of Flare"
         ) +
-        vthemes::theme_vmodern()
+        vthemes::theme_vmodern(size_preset = "medium")
     }
     
     plt <- patchwork::wrap_plots(plt_ls, nrow = 1, ncol = length(plt_ls)) +
@@ -1339,7 +1480,7 @@ for (forecast in c(3, 6, 12)) {
       patchwork::plot_annotation(
         title = sprintf("Accrual = %syr, Forecast = %smo", accrual, forecast),
         theme = ggplot2::theme(
-          title = ggplot2::element_text(face = "bold")
+          title = ggplot2::element_text(face = "bold", size = 16)
         )
       )
     ggplot2::ggsave(
@@ -1347,8 +1488,8 @@ for (forecast in c(3, 6, 12)) {
       filename = file.path(
         FIGURES_DIR, sprintf("pdp_forecast%s_accrual%s.pdf", forecast, accrual)
       ),
-      width = 12,
-      height = 3
+      width = 13,
+      height = 3.5
     )
     plt_ls_all[[plt_name]] <- patchwork::wrap_elements(plt)
   }
@@ -1360,8 +1501,92 @@ ggplot2::ggsave(
   filename = file.path(
     FIGURES_DIR, "pdp_plots.pdf"
   ),
-  width = 12,
-  height = 18
+  width = 14,
+  height = 17
+  # height = 18
 )
 
+##################### Other Figures #####################
 
+#### Lab Value Distribution ####
+source(here::here("functions", "load.R"))
+lab_df_orig <- load_lab_data()
+keep_labs <- c(
+  "basophils", "calcium", "co2", "creatinine", "eosinophils", "glucose",
+  "hgb", "lymphocytes", "platelet", "wbc"
+)
+log_vars <- c(
+  "Calcium", "Creatinine", "Eosinophils", "Glucose", 
+  "Lymphocytes", "Platelets", "White Blood Cells"
+)
+plt1 <- lab_df_orig |>
+  dplyr::filter(
+    LabName %in% !!keep_labs
+  ) |>
+  dplyr::mutate(
+    LabName = dplyr::case_when(
+      LabName == "co2" ~ "CO2",
+      LabName == "hgb" ~ "Hemoglobin",
+      LabName == "wbc" ~ "White Blood Cells",
+      LabName == "platelet" ~ "Platelets",
+      TRUE ~ stringr::str_to_title(LabName)
+    )
+  ) |>
+  ggplot2::ggplot() +
+  ggplot2::aes(x = LabValue) +
+  ggplot2::geom_density(fill = "#6FBBE3", alpha = 0.4) +
+  ggplot2::facet_wrap(~ LabName, scales = "free", nrow = 2) +
+  ggplot2::labs(
+    x = "Lab Value", y = "Density",
+    title = "Distribution of Raw Lab Values"
+  ) +
+  vthemes::theme_vmodern(size_preset = "medium")
+plt2 <- lab_df_orig |>
+  dplyr::filter(
+    LabName %in% !!keep_labs
+  ) |>
+  dplyr::mutate(
+    LabName = dplyr::case_when(
+      LabName == "co2" ~ "CO2",
+      LabName == "hgb" ~ "Hemoglobin",
+      LabName == "wbc" ~ "White Blood Cells",
+      LabName == "platelet" ~ "Platelets",
+      TRUE ~ stringr::str_to_title(LabName)
+    ) |>
+      as.factor()
+  ) |>
+  dplyr::mutate(
+    LabValue = dplyr::case_when(
+      LabName %in% log_vars ~ log(LabValue + 1),
+      TRUE ~ LabValue
+    ),
+    LabName = forcats::fct_relabel(
+      LabName, ~ ifelse(.x %in% log_vars, sprintf("log(%s+1)", .x), .x)
+    )
+  ) |>
+  ggplot2::ggplot() +
+  ggplot2::aes(x = LabValue) +
+  ggplot2::geom_density(fill = "#6FBBE3", alpha = 0.4) +
+  ggplot2::facet_wrap(~ LabName, scales = "free", nrow = 2) +
+  ggplot2::labs(
+    x = "Lab Value", y = "Density", 
+    title = "Distribution of Lab Values after Log Transformation"
+  ) +
+  vthemes::theme_vmodern(size_preset = "medium")
+plt <- patchwork::wrap_plots(plt1, plt2, nrow = 2)
+ggplot2::ggsave(
+  plt,
+  filename = file.path(
+    FIGURES_DIR, "lab_distributions_all.pdf"
+  ),
+  width = 13,
+  height = 9
+)
+ggplot2::ggsave(
+  plt1,
+  filename = file.path(
+    FIGURES_DIR, "lab_distributions.pdf"
+  ),
+  width = 10,
+  height = 5
+)
