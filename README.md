@@ -2,7 +2,7 @@
 
 This repository contains all code to reproduce the results and figures from:
 
-Jason K. Hou, Tiffany M. Tang, Shubhada Sansgiry, Tony Van, Peter Richardson, Codey Pham, Francessca Cunningham, Jessica A. Baker, Ji Zhu, Akbar K. Waljee. "Prediction of Infliximab Loss of Response or Adverse Event in a National Cohort of Patients with IBD: Comparison of Traditional and Machine Learning Models." (2024).
+Jason K. Hou, Tiffany M. Tang, Shubhada Sansgiry, Tony Van, Peter Richardson, Codey Pham, Francessca Cunningham, Jessica A. Baker, Ji Zhu, Akbar K. Waljee. "Prediction of Infliximab Loss of Response or Adverse Event in a National Cohort of Patients with IBD: Comparison of Traditional and Machine Learning Models." (2025).
 
 In this work, we aimed to investigate the safety and effectiveness of non-medical biosimilar switch of Infliximab (IFX), a highly effective and cost effective treatment for Crohn’s disease (CD) and ulcerative colitis (UC). To that end, we developed various statistical and machine learning models to predict adverse clinical events among patients on maintenance IFX.
 
@@ -18,7 +18,8 @@ to reproduce the R environment for this project.
 
 In your terminal, navigate to the root repository directory and run
 ```bash
-conda create --name <env> --file requirements.txt
+conda install conda-lock
+conda-lock install --name "your_env_name"
 ```
 to reproduce the Python environment for this project.
 
