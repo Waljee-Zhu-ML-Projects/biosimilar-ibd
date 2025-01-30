@@ -1,0 +1,11 @@
+name: biosimilar
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - ca-certificates
+  - openssl
+  - scikit-learn
+  - autogluon
+prefix: /home/tmtang/.conda/envs/biosimilar
