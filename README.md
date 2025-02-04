@@ -1,4 +1,4 @@
-# Prediction of Infliximab Loss of Response or Adverse Event in a National Cohort of Patients with IBD: Comparison of Traditional and Machine Learning Models
+# Using Machine Learning Algorithms to Optimize Treatment with High-Cost Biologics in a National Cohort of Patients with Inflammatory Bowel Disease
 
 This repository contains all code to reproduce the results and figures from:
 
